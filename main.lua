@@ -1789,3 +1789,377 @@ print("✅ Módulos adicionais carregados:")
 print("   ⚡ AntiBug Speed  — protege movimento em alta velocidade")
 print("   🎯 Hitbox All-You — visualiza hitboxes e reduz a sua")
 print("   🎒 Ver Inventário — corrige e equipa itens em tempo real")
+-- ══════════════════════════════════════════════════════════════════════
+-- ██  AUTO FOLLOW RODADA — Sempre Ativo, 100% LocalScript             ██
+-- ██  Cole no FINAL do seu script principal, sem apagar nada          ██
+-- ██                                                                  ██
+-- ██  O que faz:                                                       ██
+-- ██  Fica rodando em segundo plano desde o momento que o script      ██
+-- ██  carrega. Quando detecta que os outros jogadores foram           ██
+-- ██  teleportados para a área do jogo e você ficou para trás,        ██
+-- ██  ele te leva junto automaticamente — sem precisar clicar em      ██
+-- ██  nada. Usa três sistemas simultâneos para cobrir todos os        ██
+-- ██  casos: posição do grupo, RemoteEvents e TeleportService.        ██
+-- ══════════════════════════════════════════════════════════════════════
+
+do  -- bloco isolado: todas as variáveis ficam aqui dentro, sem colidir
+    -- com nada que já existe no script principal acima
+
+    -- ── Referências reutilizadas do script principal ─────────────────
+    -- Estas já existem no escopo acima, então referenciamos direto:
+    --   Players, RunService, LocalPlayer
+    -- getRootPart() também já existe acima — usamos ela diretamente.
+
+    -- ── Configurações ─────────────────────────────────────────────────
+
+    -- Distância em studs entre você e o grupo para considerar
+    -- que uma rodada começou e você ficou para trás.
+    -- 60 studs funciona bem para mapas médios.
+    -- Aumente para 80-100 se o mapa for muito grande.
+    local DIST_TRIGGER      = 60
+
+    -- Quantos jogadores precisam estar longe para confirmar rodada.
+    -- Valor 2 evita falsos positivos (1 jogador longe pode ser bug).
+    local MIN_JOGADORES     = 2
+
+    -- Intervalo entre verificações de posição (segundos).
+    local INTERVALO         = 0.4
+
+    -- Cooldown após te teleportar: evita loop de teleporte repetido.
+    local COOLDOWN          = 5.0
+
+    -- Quanto subir acima do chão ao aparecer (evita prender no chão).
+    local OFFSET_Y          = 4
+
+    -- ── Variáveis de controle internas ────────────────────────────────
+
+    local timer          = 0      -- acumula dt entre verificações
+    local cooldownTimer  = 0      -- acumula dt do cooldown
+    local emCooldown     = false  -- true = aguardando cooldown acabar
+    local jaSegui        = false  -- true = já seguiu nesta rodada
+
+    -- ── Função: posição média do grupo longe de mim ───────────────────
+    local function calcularGrupo()
+        -- Pega a posição do personagem local
+        local char   = LocalPlayer.Character
+        local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return 0, nil end
+
+        local minhaPos  = myRoot.Position
+        local soma      = Vector3.new(0, 0, 0)
+        local contLonge = 0
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p == LocalPlayer then continue end          -- pula a si mesmo
+
+            local c = p.Character
+            if not c then continue end
+
+            local r = c:FindFirstChild("HumanoidRootPart")
+            if not r then continue end
+
+            -- Conta apenas quem está além do limite
+            if (r.Position - minhaPos).Magnitude > DIST_TRIGGER then
+                contLonge = contLonge + 1
+                soma      = soma + r.Position
+            end
+        end
+
+        if contLonge < MIN_JOGADORES then
+            return 0, nil   -- não há jogadores suficientes longe
+        end
+
+        return contLonge, soma / contLonge   -- média da posição do grupo
+    end
+
+    -- ── Função: realiza o teleporte de forma segura ────────────────────
+    local function irParaGrupo(destino)
+        local char   = LocalPlayer.Character
+        local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+
+        -- Sobe um pouco para não spawnar dentro do chão
+        local pos = Vector3.new(destino.X, destino.Y + OFFSET_Y, destino.Z)
+
+        -- Preserva a rotação atual do personagem (não gira bruscamente)
+        local rot = myRoot.CFrame - myRoot.CFrame.Position
+        myRoot.CFrame = rot + pos
+
+        -- Inicia cooldown para evitar teleportes repetidos
+        emCooldown   = true
+        cooldownTimer = 0
+        jaSegui      = true
+
+        print("[AutoFollow] 🚀 Teleportado para a área do jogo! -> " .. tostring(pos))
+    end
+
+    -- ── Função: verifica e age (chamada pelo loop) ─────────────────────
+    local function verificar()
+        if emCooldown then return end   -- aguarda cooldown terminar
+        if jaSegui    then return end   -- já seguiu nesta rodada
+
+        local qtd, posGrupo = calcularGrupo()
+        if qtd >= MIN_JOGADORES and posGrupo then
+            print("[AutoFollow] 📍 " .. qtd .. " jogadores na área do jogo — seguindo!")
+            irParaGrupo(posGrupo)
+        end
+    end
+
+    -- ── Sistema 2: escuta RemoteEvents de início de rodada ────────────
+    -- Muitos jogos (Murder Mystery, etc.) disparam um RemoteEvent quando
+    -- a rodada começa. Ao ouvir esse evento, verificamos o grupo 0.3s
+    -- depois — mais rápido que o loop de posição.
+    local function conectarRemote(obj)
+        if not obj:IsA("RemoteEvent") then return end
+
+        -- Palavras que indicam início de rodada no nome do evento
+        local nomes = {
+            "round","rodada","start","begin","teleport",
+            "game","jogo","spawn","phase","stage","map"
+        }
+        local lower = obj.Name:lower()
+        local relevante = false
+        for _, kw in ipairs(nomes) do
+            if lower:find(kw, 1, true) then
+                relevante = true
+                break
+            end
+        end
+        if not relevante then return end
+
+        -- Escuta o evento no cliente
+        pcall(function()
+            obj.OnClientEvent:Connect(function()
+                if emCooldown then return end
+                print("[AutoFollow] 📡 RemoteEvent: " .. obj.Name .. " — verificando...")
+                task.delay(0.35, function()
+                    local qtd, posGrupo = calcularGrupo()
+                    -- Para remotes, aceita 1 jogador (sinal mais confiável)
+                    if qtd >= 1 and posGrupo then
+                        irParaGrupo(posGrupo)
+                    end
+                end)
+            end)
+        end)
+        print("[AutoFollow] 📡 Monitorando RemoteEvent: " .. obj.Name)
+    end
+
+    -- Varre ReplicatedStorage em busca de remotes relevantes
+    pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        for _, obj in ipairs(rs:GetDescendants()) do
+            conectarRemote(obj)
+        end
+        -- Também pega remotes que forem criados depois (jogos dinâmicos)
+        rs.DescendantAdded:Connect(function(obj)
+            task.wait(0.1)   -- aguarda o remote estar pronto
+            conectarRemote(obj)
+        end)
+    end)
+
+    -- ── Sistema 3: escuta TeleportService ─────────────────────────────
+    -- Se o servidor tentar teleportar o jogador e isso falhar
+    -- (comum em executors), detectamos e usamos o grupo como destino.
+    pcall(function()
+        LocalPlayer.OnTeleport:Connect(function(state, placeId)
+            if state == Enum.TeleportState.Started then
+                print("[AutoFollow] 🌐 TeleportService detectado (place " .. tostring(placeId) .. ")")
+                task.delay(1.5, function()
+                    if not emCooldown then
+                        local qtd, posGrupo = calcularGrupo()
+                        if qtd >= 1 and posGrupo then
+                            irParaGrupo(posGrupo)
+                        end
+                    end
+                end)
+
+            elseif state == Enum.TeleportState.Failed then
+                print("[AutoFollow] ⚠️ Teleporte falhou — seguindo grupo via posição")
+                task.delay(0.5, verificar)
+            end
+        end)
+    end)
+
+    -- ── Reset ao respawnar ─────────────────────────────────────────────
+    -- Após morrer e renascer, reseta os flags para monitorar a próxima
+    -- rodada normalmente — sem ficar travado em jaSegui = true.
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(0.8)         -- aguarda personagem carregar
+        jaSegui      = false
+        emCooldown   = false
+        cooldownTimer = 0
+        timer        = 0
+        print("[AutoFollow] 🔄 Personagem recarregado — pronto para próxima rodada")
+    end)
+
+    -- ── Loop principal (Sistema 1) — verifica posição do grupo ────────
+    -- Roda desde o início, sem botão, sem toggle.
+    -- Heartbeat é chamado após a física de cada frame — ideal para
+    -- leitura de posição sem conflito com a engine de física.
+    RunService.Heartbeat:Connect(function(dt)
+        -- Gerencia cooldown
+        if emCooldown then
+            cooldownTimer = cooldownTimer + dt
+            if cooldownTimer >= COOLDOWN then
+                emCooldown   = false
+                jaSegui      = false
+                cooldownTimer = 0
+                print("[AutoFollow] ✅ Cooldown encerrado — monitorando...")
+            end
+            return   -- não verifica durante cooldown
+        end
+
+        -- Acumula tempo e verifica no intervalo configurado
+        timer = timer + dt
+        if timer >= INTERVALO then
+            timer = 0
+            pcall(verificar)   -- pcall garante que erros não quebrem o loop
+        end
+    end)
+
+    -- ── Confirmação no output ──────────────────────────────────────────
+    print("✅ [AutoFollow] SEMPRE ATIVO — Seguindo rodada automaticamente")
+    print("   Dist. gatilho : " .. DIST_TRIGGER .. " studs")
+    print("   Mín. jogadores: " .. MIN_JOGADORES)
+    print("   Cooldown       : " .. COOLDOWN .. "s")
+    print("   3 sistemas: posição do grupo + RemoteEvents + TeleportService")
+
+end  -- fim do bloco isolado
+
+_teleportConn then
+        af_teleportConn:Disconnect()
+        af_teleportConn = nil
+    end
+
+    af_teleportConn = LocalPlayer.OnTeleport:Connect(function(teleportState, placeId, spawnName)
+        if not af_ativo then return end
+
+        if teleportState == Enum.TeleportState.Started then
+            print("[AutoFollow] 🌐 TeleportService detectado para place: " .. tostring(placeId))
+            -- O jogo está tentando nos teleportar para outro lugar.
+            -- Como estamos num executor, esse teleporte pode não funcionar.
+            -- Reagimos seguindo a posição do grupo como fallback.
+            task.delay(1.5, function()
+                if af_ativo then
+                    local qtd, posGrupo = calcularPosicaoGrupo()
+                    if qtd >= 1 and posGrupo then
+                        executarTeleporte(posGrupo)
+                    end
+                end
+            end)
+
+        elseif teleportState == Enum.TeleportState.Failed then
+            print("[AutoFollow] ⚠️ Teleporte falhou — tentando seguir grupo via posição")
+            task.delay(0.5, function()
+                if af_ativo then verificarETeleportar() end
+            end)
+        end
+    end)
+end
+
+-- ── Função: AtivarAutoFollow ──────────────────────────────────────────
+local function AtivarAutoFollow()
+    af_ativo         = true
+    af_jaSegui       = false
+    af_emCooldown    = false
+    af_timer         = 0
+    af_cooldownTimer = 0
+
+    -- Inicia monitoramento de RemoteEvents
+    monitorarRemotes()
+
+    -- Inicia monitoramento de TeleportService
+    monitorarOnTeleport()
+
+    -- Loop principal: verifica posição do grupo a cada AF_INTERVALO segundos
+    af_conn = RunService.Heartbeat:Connect(function(dt)
+        af_timer         = af_timer + dt
+        af_cooldownTimer = af_cooldownTimer + dt
+
+        -- Gerencia cooldown: após AF_COOLDOWN segundos, libera para nova verificação
+        if af_emCooldown and af_cooldownTimer >= AF_COOLDOWN then
+            af_emCooldown    = false
+            af_jaSegui       = false
+            af_cooldownTimer = 0
+            print("[AutoFollow] ✅ Cooldown encerrado — monitorando próxima rodada...")
+        end
+
+        -- Só verifica posição no intervalo configurado (não todo frame)
+        if af_timer >= AF_INTERVALO then
+            af_timer = 0
+            pcall(verificarETeleportar)
+        end
+    end)
+
+    -- Reativa após respawn (personagem renova após morrer/reconectar)
+    af_charConn = LocalPlayer.CharacterAdded:Connect(function(char)
+        if af_ativo then
+            -- Aguarda o personagem carregar completamente antes de monitorar
+            task.wait(0.8)
+            af_jaSegui       = false
+            af_emCooldown    = false
+            af_cooldownTimer = 0
+            print("[AutoFollow] 🔄 Personagem recarregado — monitoramento reiniciado")
+        end
+    end)
+
+    print("[AutoFollow] ✅ ATIVADO")
+    print("[AutoFollow] ℹ️ Aguardando início de rodada...")
+    print("[AutoFollow]    • Distância gatilho : " .. AF_DIST_TRIGGER .. " studs")
+    print("[AutoFollow]    • Mín. jogadores    : " .. AF_MIN_JOGADORES)
+    print("[AutoFollow]    • Cooldown          : " .. AF_COOLDOWN .. "s")
+end
+
+-- ── Função: DesativarAutoFollow ───────────────────────────────────────
+local function DesativarAutoFollow()
+    af_ativo = false
+
+    -- Para o loop principal
+    if af_conn then
+        af_conn:Disconnect()
+        af_conn = nil
+    end
+
+    -- Remove listener de CharacterAdded
+    if af_charConn then
+        af_charConn:Disconnect()
+        af_charConn = nil
+    end
+
+    -- Remove listener de OnTeleport
+    if af_teleportConn then
+        af_teleportConn:Disconnect()
+        af_teleportConn = nil
+    end
+
+    -- Remove todos os listeners de RemoteEvents
+    for _, conn in ipairs(af_remoteConns) do
+        pcall(function() conn:Disconnect() end)
+    end
+    af_remoteConns = {}
+
+    -- Reseta variáveis internas
+    af_jaSegui       = false
+    af_emCooldown    = false
+    af_timer         = 0
+    af_cooldownTimer = 0
+
+    print("[AutoFollow] ⛔ DESATIVADO")
+end
+
+-- ── Conexão do botão no painel ────────────────────────────────────────
+BtnAutoFollow.MouseButton1Click:Connect(function()
+    State.AutoFollow = not State.AutoFollow
+    setToggleColor(BtnAutoFollow, State.AutoFollow)
+
+    if State.AutoFollow then
+        AtivarAutoFollow()
+    else
+        DesativarAutoFollow()
+    end
+end)
+
+-- ── Mensagem no output ────────────────────────────────────────────────
+print("   🎮 Auto Follow Rodada — segue o grupo ao início da partida")
+print("      Monitora: posição do grupo + RemoteEvents + TeleportService")
+
